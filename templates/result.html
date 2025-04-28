@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Generated Captions</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        /* Resize the image to fit within the page */
+        .img-fluid {
+            max-width: 50%;
+            height: auto;
+            margin: 0 auto;
+        }
+
+        /* Apply different styling for the COCO caption */
+        .coco-caption {
+            font-style: italic;
+            color: #888; /* Light gray color */
+            border: 1px dashed #888; /* Dashed border to differentiate it */
+            padding: 10px;
+            background-color: #f9f9f9; /* Light background */
+        }
+
+        /* Additional styling to make the captions more readable */
+        .caption-list {
+            margin-top: 20px;
+        }
+
+        .list-group-item {
+            padding: 10px;
+            font-size: 1.1rem;
+        }
+
+        .col-coco {
+            border-right: 2px solid #ddd; /* Border between COCO and Generated captions */
+        }
+    </style>
+</head>
+<body class="bg-light">
+    <div class="container py-5">
+        <h1 class="text-center mb-4">Generated Captions</h1>
+        <div class="card shadow-sm p-4">
+            <!-- Image at the top -->
+            <img src="{{ image_path }}" alt="Uploaded Image" class="img-fluid rounded mb-4">
+
+            <div class="row">
+                <!-- Left column for COCO caption -->
+                <div class="col-md-6 col-coco">
+                    <h2>COCO Caption:</h2>
+                    {% if "COCO" in captions %}
+                        <div class="list-group">
+                            <div class="list-group-item coco-caption">
+                                <strong>COCO:</strong> {{ captions["COCO"] }}
+                            </div>
+                        </div>
+                    {% else %}
+                        <p>No COCO caption found.</p>
+                    {% endif %}
+                </div>
+
+                <!-- Right column for Generated Captions -->
+                <div class="col-md-6">
+                    <h2>Generated Captions:</h2>
+                    <ul class="list-group caption-list">
+                        {% for model, caption in captions.items() %}
+                            <!-- Style the COCO caption differently -->
+                            {% if model != "COCO" %}
+                                 <li class="list-group-item" style="color: {{ caption_colors[model] }};">
+                                    <strong>{{ model }}:</strong> {{ caption }}
+                                </li>
+                            {% endif %}
+                        {% endfor %}
+                    </ul>
+                </div>
+            </div>
+
+            <a href="/" class="btn btn-secondary mt-4">Go Back</a>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
