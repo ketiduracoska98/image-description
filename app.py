@@ -6,6 +6,7 @@ from PIL import Image
 from transformers import BertTokenizer, BertModel
 import torch
 from sklearn.metrics.pairwise import cosine_similarity
+import subprocess
 
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 model = BertModel.from_pretrained('bert-base-uncased')
@@ -85,6 +86,7 @@ def upload_or_choose_image():
 
 @app.route("/generate_captions", methods=["POST"])
 def generate_captions(data=None):
+    global flink_results
     if not data:
         data = request.json
 
@@ -127,7 +129,34 @@ def generate_captions(data=None):
                 is_equivalent = are_sentences_equivalent(caption, coco_caption if coco_caption else "")
                 caption_colors[model] = "green" if is_equivalent else "red"
 
-        return render_template("result.html", image_path=image_path, captions=captions, caption_colors=caption_colors)
+        # Save generated captions and reference to caption_stream.txt for Flink
+        try:
+            with open("caption_stream.txt", "w") as f:
+                for model, caption in captions.items():
+                    if model != "COCO":
+                        f.write(json.dumps({
+                            "image": image_name,
+                            "model": model,
+                            "caption": caption,
+                            "reference": coco_caption if coco_caption else ""
+                        }) + "\n")
+        except Exception as e:
+            print(f"Failed to write to caption_stream.txt: {e}")
+
+
+        # Trigger the Flink job (in batch mode, via Python API)
+        try:
+            flink_results = subprocess.run(["python3", "flink_caption_evaluator.py"], check=True, capture_output=True, text=True)
+            flink_results = [
+                json.loads(line)
+                for line in flink_results.stdout.strip().splitlines()
+                if line.strip()
+            ]
+
+        except subprocess.CalledProcessError as e:
+            print(f"Flink script failed: {e}")
+
+        return render_template("result.html", image_path=image_path, captions=captions, caption_colors=caption_colors, flink_results=flink_results)
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)})

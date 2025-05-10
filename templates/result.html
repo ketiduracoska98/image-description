@@ -75,6 +75,33 @@
                 </div>
             </div>
 
+            <!-- Display Flink Evaluation Results -->
+            {% if flink_results %}
+            <div class="evaluation-section">
+                <h3>Flink Evaluation (BLEU & ROUGE)</h3>
+                <table class="table table-bordered evaluation-table">
+                    <thead>
+                        <tr>
+                            <th>Model</th>
+                            <th>Image</th>
+                            <th>BLEU Score</th>
+                            <th>ROUGE-L Score</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for result in flink_results %}
+                        <tr>
+                            <td>{{ result.model }}</td>
+                            <td>{{ result.image }}</td>
+                            <td>{{ result.BLEU | round(4) }}</td>
+                            <td>{{ result["ROUGE-L"] | round(4) }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% endif %}
+
             <a href="/" class="btn btn-secondary mt-4">Go Back</a>
         </div>
     </div>
