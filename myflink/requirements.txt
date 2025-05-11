@@ -1,0 +1,3 @@
+nltk
+rouge-score
+apache-flink==1.17.0

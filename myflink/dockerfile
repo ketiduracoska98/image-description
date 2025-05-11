@@ -1,0 +1,22 @@
+FROM flink:1.18.0
+
+# Install Python
+RUN apt-get update -y && \
+    apt-get install -y python3 python3-pip python3-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Ensure python command points to python3
+RUN ln -s /usr/bin/python3 /usr/bin/python
+
+# Copy the Kafka connector JAR to the Flink container
+COPY flink-connector-kafka_2.11-1.18.0.jar /opt/flink/lib/
+
+# Install Python dependencies
+RUN pip install nltk
+RUN pip install rouge-score
+RUN python -m pip install apache-flink
+
+WORKDIR /app
+COPY flink_main.py .
+
+CMD ["python", "flink_main.py"]
