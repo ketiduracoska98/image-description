@@ -7,6 +7,20 @@ from transformers import BertTokenizer, BertModel
 import torch
 from sklearn.metrics.pairwise import cosine_similarity
 import subprocess
+from kafka import KafkaProducer,KafkaConsumer
+
+
+producer = KafkaProducer(
+    bootstrap_servers='localhost:9092',
+    value_serializer=lambda v: json.dumps(v).encode('utf-8')
+)
+consumer = KafkaConsumer(
+    'image-topic',
+    bootstrap_servers='localhost:9092',
+    value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+    group_id='caption-group',  # Consumer group
+    auto_offset_reset='earliest'  # Start reading from the earliest message
+)
 
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 model = BertModel.from_pretrained('bert-base-uncased')
@@ -74,7 +88,10 @@ def upload_or_choose_image():
             dataset_image = request.form["dataset_image"]
             file_path = os.path.join(app.config['DATASET_FOLDER'], dataset_image)
             if os.path.exists(file_path):
-                return generate_captions({"image_path": file_path})
+                producer.send('image-topic', {'image_path': file_path})
+                producer.flush()  # Ensure the message is sent
+
+                return render_template("index.html", message="Image path sent to Kafka!")
             else:
                 return render_template("index.html", error="File not found in dataset", dataset_images=load_dataset())
 
@@ -83,6 +100,18 @@ def upload_or_choose_image():
     dataset_images = load_dataset()
     return render_template("index.html", dataset_images=dataset_images)
 
+
+def listen_to_kafka():
+    for message in consumer:
+        image_path = message.value['image_path']
+        caption = generate_captions({"image_path": image_path})
+        print(caption)
+
+# Run Kafka consumer in a background thread
+def start_kafka_listener():
+    listener_thread = threading.Thread(target=listen_to_kafka)
+    listener_thread.daemon = True  # Allows the app to exit even if this thread is running
+    listener_thread.start()
 
 @app.route("/generate_captions", methods=["POST"])
 def generate_captions(data=None):
