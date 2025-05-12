@@ -6,6 +6,31 @@ from PIL import Image
 from transformers import BertTokenizer, BertModel
 import torch
 from sklearn.metrics.pairwise import cosine_similarity
+from kafka import KafkaProducer,KafkaConsumer
+
+
+producer = KafkaProducer(
+    bootstrap_servers='localhost:9092',
+    value_serializer=lambda v: json.dumps(v).encode('utf-8')
+)
+
+consumer = KafkaConsumer(
+    'image-topic',
+    bootstrap_servers='localhost:9092',
+    value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+    group_id='caption-group',  # Consumer group
+    auto_offset_reset='earliest'  # Start reading from the earliest message
+)
+
+scored_consumer = KafkaConsumer(
+    'captions-scored',
+    bootstrap_servers='localhost:9092',
+    value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+    group_id='flask-scored-consumer',
+    auto_offset_reset='earliest',
+    enable_auto_commit=True
+)
+
 
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 model = BertModel.from_pretrained('bert-base-uncased')
@@ -73,6 +98,9 @@ def upload_or_choose_image():
             dataset_image = request.form["dataset_image"]
             file_path = os.path.join(app.config['DATASET_FOLDER'], dataset_image)
             if os.path.exists(file_path):
+            #     producer.send('imag`e-topic', {'image_path': file_path})
+            #     producer.flush()  # Ensure the message is sent
+            #     return render_template("index.html", message="Image path sent to Kafka!")
                 return generate_captions({"image_path": file_path})
             else:
                 return render_template("index.html", error="File not found in dataset", dataset_images=load_dataset())
@@ -81,6 +109,52 @@ def upload_or_choose_image():
 
     dataset_images = load_dataset()
     return render_template("index.html", dataset_images=dataset_images)
+
+def listen_to_kafka():
+    for message in consumer:
+        image_path = message.value['image_path']
+        caption = generate_captions({"image_path": image_path})
+        print(caption)
+
+
+# Run Kafka consumer in a background thread
+def start_kafka_listener():
+    listener_thread = threading.Thread(target=listen_to_kafka)
+    listener_thread.daemon = True  # Allows the app to exit even if this thread is running
+    listener_thread.start()
+
+
+def get_scored_results(image_path, timeout_secs=10):
+    from kafka import KafkaConsumer
+    import time
+    import json
+    image_name = os.path.basename(image_path)
+    deadline = time.time() + timeout_secs
+
+    consumer = KafkaConsumer(
+        'captions-scored',
+        bootstrap_servers='localhost:9092',
+        value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+        group_id=None,  # no group ID to avoid committing offsets
+        auto_offset_reset='earliest',
+        consumer_timeout_ms=1000  # exit loop after a bit if no messages
+    )
+
+    while time.time() < deadline:
+        for msg in consumer:
+            try:
+                data = msg.value
+                if isinstance(data, list):
+                    if data[0].get("image") == image_path or data[0].get("image") == image_name:
+                        consumer.close()
+                        return data
+            except Exception as e:
+                print(f"Error parsing scored result: {e}")
+        time.sleep(1)
+
+    consumer.close()
+    return []
+
 
 
 @app.route("/generate_captions", methods=["POST"])
@@ -114,10 +188,13 @@ def generate_captions(data=None):
             if item["image_name"] == image_name:
                 coco_caption = item["caption"]
                 break
+
+        # Prepare the caption data
         captions = {
             "ViT-GPT2": vit_caption,
             "GIT-large-COCO": git_caption,
-            "BLIP": blip_caption        }
+            "BLIP": blip_caption
+        }
         if coco_caption:
             captions["COCO"] = coco_caption
 
@@ -127,7 +204,22 @@ def generate_captions(data=None):
                 is_equivalent = are_sentences_equivalent(caption, coco_caption if coco_caption else "")
                 caption_colors[model] = "green" if is_equivalent else "red"
 
-        return render_template("result.html", image_path=image_path, captions=captions, caption_colors=caption_colors)
+        # Send the caption data to Kafka
+        caption_data = {
+            "image": image_path,
+            "captions": captions
+        }
+
+
+        print(f"Sending data to Kafka: {caption_data}")
+
+        # Send to Kafka
+        producer.send('captions-input', value=caption_data)
+        producer.flush()  # Ensure the message is sent
+
+        flink_scores = get_scored_results(image_path)
+
+        return render_template("result.html", image_path=image_path, captions=captions, caption_colors=caption_colors, flink_scores=flink_scores)
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)})
