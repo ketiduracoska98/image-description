@@ -1,4 +1,4 @@
-FROM flink:1.18.0
+FROM flink:1.17.0
 
 # Install Python
 RUN apt-get update -y && \
@@ -9,11 +9,13 @@ RUN apt-get update -y && \
 RUN ln -s /usr/bin/python3 /usr/bin/python
 
 # Copy the Kafka connector JAR to the Flink container
-COPY flink-connector-kafka_2.11-1.18.0.jar /opt/flink/lib/
+COPY flink-sql-connector-kafka-3.0.0-1.17.jar /opt/flink/lib/
 
 # Install Python dependencies
 RUN pip install nltk
 RUN pip install rouge-score
+# RUN pip install scikit-learn
+# RUN pip install torch transformers
 RUN python -m pip install apache-flink
 
 WORKDIR /app

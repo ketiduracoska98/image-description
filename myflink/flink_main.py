@@ -1,53 +1,63 @@
-import json
-from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
-from rouge_score import rouge_scorer
 from pyflink.datastream import StreamExecutionEnvironment
 from pyflink.datastream.connectors.kafka import FlinkKafkaConsumer, FlinkKafkaProducer
 from pyflink.common.serialization import SimpleStringSchema
 from pyflink.common.typeinfo import Types
-
+import json
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+from rouge_score import rouge_scorer
 
 def evaluate_caption(data):
-    """
-    Evaluates the BLEU and ROUGE-L scores for the given caption data.
-    Assumes data is in JSON format containing 'caption' and 'reference' fields.
-    """
     try:
+        print(f"[INFO] Received data: {data}")  # 🔍 Log incoming message
+
         obj = json.loads(data)
-        candidate = obj.get('caption', '').split()
-        reference = [obj.get('reference', '').split()]
+        captions = obj.get('captions', {})
+        image = obj.get('image', '')
 
-        # Compute BLEU score
-        smooth_fn = SmoothingFunction().method1
-        bleu = sentence_bleu(reference, candidate, smoothing_function=smooth_fn)
+        reference = captions.get("COCO", None)
+        if not reference:
+            print("[WARN] Missing COCO reference caption.")
+            return json.dumps({"error": "Missing COCO reference"})
 
-        # Compute ROUGE-L score
-        scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
-        rouge = scorer.score(obj.get('reference', ''), obj.get('caption', ''))['rougeL'].fmeasure
+        results = []
+        for model, caption in captions.items():
+            if model == "COCO":
+                continue
 
-        # Prepare the output
-        result = {
-            "image": obj.get("image", ""),
-            "model": obj.get("model", ""),
-            "BLEU": bleu,
-            "ROUGE-L": rouge
-        }
+            # Compute BLEU score
+            smooth_fn = SmoothingFunction().method1
+            bleu = sentence_bleu([reference.split()], caption.split(), smoothing_function=smooth_fn)
 
-        return json.dumps(result)
+            # Compute ROUGE-L score
+            scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
+            rouge = scorer.score(reference, caption)['rougeL'].fmeasure
+
+            score_entry = {
+                "image": image,
+                "model": model,
+                "BLEU": bleu,
+                "ROUGE-L": rouge
+            }
+            print(f"[INFO] Scored model '{model}': {score_entry}")
+
+            results.append(score_entry)
+
+        return json.dumps(results)
 
     except Exception as e:
-        # Error handling for invalid or missing fields
+        error_message = f"[ERROR] Failed to evaluate caption: {str(e)}"
+        print(error_message)
         return json.dumps({"error": str(e)})
 
 
 def create_kafka_source(bootstrap_servers, topic, group_id='caption-evaluator-group'):
-    """
-    Create a Flink Kafka source.
-    """
     consumer_props = {
-        'bootstrap.servers': bootstrap_servers,
+        'bootstrap.servers': 'kafka:29092',
         'group.id': group_id,
-        'auto.offset.reset': 'earliest'
+        'auto.offset.reset': 'earliest',
+        'fetch.max.wait.ms': '120000',
+        'max.poll.interval.ms': '120000',
+        'max.request.size': '1048576000'
     }
 
     source = FlinkKafkaConsumer(
@@ -55,15 +65,12 @@ def create_kafka_source(bootstrap_servers, topic, group_id='caption-evaluator-gr
         deserialization_schema=SimpleStringSchema(),
         properties=consumer_props
     )
-    source.set_start_from_earliest()  # Start consuming from the earliest offset
+    source.set_start_from_earliest()
 
     return source
 
 
 def create_kafka_sink(bootstrap_servers, topic):
-    """
-    Create a Flink Kafka sink.
-    """
     producer_props = {
         'bootstrap.servers': bootstrap_servers
     }
@@ -78,33 +85,23 @@ def create_kafka_sink(bootstrap_servers, topic):
 
 
 def main():
-    # Set up the Flink execution environment
     env = StreamExecutionEnvironment.get_execution_environment()
-
-    # Add the Kafka connector JAR
-    env.get_config().get_configuration().set_string(
-        "pipeline.jars", "file:///path/to/flink-connector-kafka_2.11-1.18.0.jar"
-    )
-
+    env.add_jars("file:///opt/flink/lib/flink-sql-connector-kafka-3.0.0-1.17.jar")
     env.set_parallelism(1)
 
-    # Kafka source and sink setup
-    bootstrap_servers = 'kafka:9092'
+    bootstrap_servers = 'kafka:29092'
     input_topic = 'captions-input'
     output_topic = 'captions-scored'
 
+    print("[INFO] Setting up Kafka source and sink...")
     source = create_kafka_source(bootstrap_servers, input_topic)
     sink = create_kafka_sink(bootstrap_servers, output_topic)
 
-    # Process the stream
+    print("[INFO] Starting stream processing...")
     stream = env.add_source(source).map(evaluate_caption, output_type=Types.STRING())
-
-    # Send the processed stream to the Kafka sink
     stream.add_sink(sink)
 
-    # Execute the Flink job
     env.execute("Kafka Caption Evaluation Job")
-
 
 
 if __name__ == "__main__":
