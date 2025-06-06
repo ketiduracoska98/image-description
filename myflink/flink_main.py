@@ -8,7 +8,7 @@ from rouge_score import rouge_scorer
 
 def evaluate_caption(data):
     try:
-        print(f"[INFO] Received data: {data}")  # 🔍 Log incoming message
+        print(f"[INFO] Received data: {data}")
 
         obj = json.loads(data)
         captions = obj.get('captions', {})
@@ -24,11 +24,9 @@ def evaluate_caption(data):
             if model == "COCO":
                 continue
 
-            # Compute BLEU score
             smooth_fn = SmoothingFunction().method1
             bleu = sentence_bleu([reference.split()], caption.split(), smoothing_function=smooth_fn)
 
-            # Compute ROUGE-L score
             scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
             rouge = scorer.score(reference, caption)['rougeL'].fmeasure
 

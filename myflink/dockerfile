@@ -17,6 +17,7 @@ RUN pip install rouge-score
 # RUN pip install scikit-learn
 # RUN pip install torch transformers
 RUN python -m pip install apache-flink
+RUN pip install prometheus_client
 
 WORKDIR /app
 COPY flink_main.py .

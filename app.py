@@ -7,6 +7,17 @@ from transformers import BertTokenizer, BertModel
 import torch
 from sklearn.metrics.pairwise import cosine_similarity
 from kafka import KafkaProducer,KafkaConsumer
+from prometheus_client import start_http_server, Gauge, Counter, Histogram
+import time
+
+start_http_server(8000)
+inference_time = Histogram('caption_inference_duration_seconds', 'Time to generate a caption', ['model'])
+bleu_score = Gauge('caption_bleu_score', 'BLEU score of model', ['model', 'image'])
+rouge_score = Gauge('caption_rouge_l_score', 'ROUGE-L score of model', ['model', 'image'])
+cosine_score = Gauge('caption_cosine_similarity', 'Cosine similarity vs COCO', ['model', 'image'])
+equivalence_flag = Gauge('caption_equivalent_to_coco', 'Semantic match with COCO (1/0)', ['model', 'image'])
+inference_counter = Counter('caption_total_inferences', 'Total inferences run', ['model'])
+error_counter = Counter('caption_errors_total', 'Errors during captioning', ['model'])
 
 
 producer = KafkaProducer(
@@ -18,8 +29,8 @@ consumer = KafkaConsumer(
     'image-topic',
     bootstrap_servers='localhost:9092',
     value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-    group_id='caption-group',  # Consumer group
-    auto_offset_reset='earliest'  # Start reading from the earliest message
+    group_id='caption-group',
+    auto_offset_reset='earliest'
 )
 
 scored_consumer = KafkaConsumer(
@@ -35,15 +46,12 @@ scored_consumer = KafkaConsumer(
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 model = BertModel.from_pretrained('bert-base-uncased')
 
-# Load the ViT-GPT2 model and tokenizer
 vit_model = VisionEncoderDecoderModel.from_pretrained("nlpconnect/vit-gpt2-image-captioning")
 vit_tokenizer = GPT2TokenizerFast.from_pretrained("nlpconnect/vit-gpt2-image-captioning")
 vit_image_processor = ViTImageProcessor.from_pretrained("nlpconnect/vit-gpt2-image-captioning")
 
-# Load the GIT-large-COCO model
 caption_generator_git = pipeline("image-to-text", model="microsoft/git-large-coco")
 
-# Load the BLIP processor and model
 blip_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-large")
 blip_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-large")
 
@@ -170,15 +178,42 @@ def generate_captions(data=None):
         image = Image.open(image_path)
 
         # Generate caption using ViT-GPT2 model
-        pixel_values = vit_image_processor(image, return_tensors="pt").pixel_values
-        generated_ids = vit_model.generate(pixel_values)
-        vit_caption = vit_tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        model_name = "ViT-GPT2"
+        inference_counter.labels(model=model_name).inc()
+        start = time.time()
+        try:
+            pixel_values = vit_image_processor(image, return_tensors="pt").pixel_values
+            generated_ids = vit_model.generate(pixel_values)
+            vit_caption = vit_tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        except Exception:
+            error_counter.labels(model=model_name).inc()
+            vit_caption = ""
+        finally:
+            inference_time.labels(model=model_name).observe(time.time() - start)
 
-        # Generate caption using GIT-large-COCO model
-        git_caption = caption_generator_git(image)[0]['generated_text']
+        # GIT
+        model_name = "GIT"
+        inference_counter.labels(model=model_name).inc()
+        start = time.time()
+        try:
+            git_caption = caption_generator_git(image)[0]['generated_text']
+        except Exception:
+            error_counter.labels(model=model_name).inc()
+            git_caption = ""
+        finally:
+            inference_time.labels(model=model_name).observe(time.time() - start)
 
-        # Generate caption using BLIP model
-        blip_caption = generate_captions_blip(image)
+        # BLIP
+        model_name = "BLIP"
+        inference_counter.labels(model=model_name).inc()
+        start = time.time()
+        try:
+            blip_caption = generate_captions_blip(image)
+        except Exception:
+            error_counter.labels(model=model_name).inc()
+            blip_caption = ""
+        finally:
+            inference_time.labels(model=model_name).observe(time.time() - start)
 
         with open('captions_and_images.json', 'r') as f:
             captions_data = json.load(f)
@@ -189,7 +224,6 @@ def generate_captions(data=None):
                 coco_caption = item["caption"]
                 break
 
-        # Prepare the caption data
         captions = {
             "ViT-GPT2": vit_caption,
             "GIT-large-COCO": git_caption,
@@ -203,8 +237,17 @@ def generate_captions(data=None):
             if model != "COCO":
                 is_equivalent = are_sentences_equivalent(caption, coco_caption if coco_caption else "")
                 caption_colors[model] = "green" if is_equivalent else "red"
+            # Cosine similarity
+            try:
+                embedding1 = get_sentence_embedding(caption)
+                embedding2 = get_sentence_embedding(coco_caption)
+                sim = cosine_similarity(embedding1.reshape(1, -1), embedding2.reshape(1, -1))[0][0]
+                cosine_score.labels(model=model, image=image_name).set(sim)
+            except:
+                pass
 
-        # Send the caption data to Kafka
+            equivalence_flag.labels(model=model, image=image_name).set(1 if is_equivalent else 0)
+
         caption_data = {
             "image": image_path,
             "captions": captions
@@ -213,9 +256,8 @@ def generate_captions(data=None):
 
         print(f"Sending data to Kafka: {caption_data}")
 
-        # Send to Kafka
         producer.send('captions-input', value=caption_data)
-        producer.flush()  # Ensure the message is sent
+        producer.flush()
 
         flink_scores = get_scored_results(image_path)
 
@@ -236,4 +278,5 @@ def dataset_file(filename):
     return send_from_directory(DATASET_FOLDER, filename)
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=8000)
+
