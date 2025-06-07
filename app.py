@@ -6,6 +6,7 @@ from PIL import Image
 from transformers import BertTokenizer, BertModel
 import torch
 from sklearn.metrics.pairwise import cosine_similarity
+
 from kafka import KafkaProducer,KafkaConsumer
 from prometheus_client import start_http_server, Gauge, Counter, Histogram
 import time
@@ -169,6 +170,7 @@ def get_scored_results(image_path, timeout_secs=10):
 
 @app.route("/generate_captions", methods=["POST"])
 def generate_captions(data=None):
+    global flink_results
     if not data:
         data = request.json
 
@@ -264,6 +266,7 @@ def generate_captions(data=None):
         flink_scores = get_scored_results(image_path)
 
         return render_template("result.html", image_path=image_path, captions=captions, caption_colors=caption_colors, flink_scores=flink_scores)
+
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)})
