@@ -371,6 +371,9 @@ def upload_and_caption():
         )
 
     except Exception as e:
+        error_counter.labels(model='ViT-GPT2').inc()
+        error_counter.labels(model='GIT').inc()
+        error_counter.labels(model='BLIP').inc()
         return jsonify({"status": "error", "message": str(e)})
 
 
@@ -450,6 +453,9 @@ def own_data():
             )
 
         except Exception as e:
+            error_counter.labels(model='ViT-GPT2').inc()
+            error_counter.labels(model='GIT').inc()
+            error_counter.labels(model='BLIP').inc()
             return render_template('own_data.html', error=f"Processing failed: {str(e)}")
 
     return render_template('own_data.html')
