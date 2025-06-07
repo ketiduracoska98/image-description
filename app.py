@@ -1,5 +1,5 @@
 import json
-from flask import Flask, request, render_template, jsonify, send_from_directory
+from flask import Flask, request, render_template, jsonify, send_from_directory, redirect, url_for
 import os
 from transformers import GPT2TokenizerFast, ViTImageProcessor, VisionEncoderDecoderModel, BlipProcessor, BlipForConditionalGeneration, pipeline
 from PIL import Image
@@ -9,6 +9,8 @@ from sklearn.metrics.pairwise import cosine_similarity
 from kafka import KafkaProducer,KafkaConsumer
 from prometheus_client import start_http_server, Gauge, Counter, Histogram
 import time
+from werkzeug.utils import secure_filename
+
 
 start_http_server(8000)
 inference_time = Histogram('caption_inference_duration_seconds', 'Time to generate a caption', ['model'])
@@ -265,6 +267,215 @@ def generate_captions(data=None):
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)})
+
+@app.route("/upload_and_caption", methods=["POST"])
+def upload_and_caption():
+    if "image" not in request.files or "user_caption" not in request.form:
+        return jsonify({"status": "error", "message": "Image file and caption are required."})
+
+    file = request.files["image"]
+    user_caption = request.form["user_caption"]
+
+    if file.filename == "" or not allowed_file(file.filename):
+        return jsonify({"status": "error", "message": "Invalid file format."})
+
+    try:
+        filename = file.filename
+        save_path = os.path.join(DATASET_FOLDER, filename)
+        file.save(save_path)
+
+        image = Image.open(save_path)
+
+        # Reuse model inference logic from `generate_captions()`, with user_caption replacing coco_caption
+        captions = {}
+        caption_colors = {}
+
+        # ViT-GPT2
+        model_name = "ViT-GPT2"
+        inference_counter.labels(model=model_name).inc()
+        start = time.time()
+        try:
+            pixel_values = vit_image_processor(image, return_tensors="pt").pixel_values
+            generated_ids = vit_model.generate(pixel_values)
+            vit_caption = vit_tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        except Exception:
+            error_counter.labels(model=model_name).inc()
+            vit_caption = ""
+        finally:
+            inference_time.labels(model=model_name).observe(time.time() - start)
+        captions["ViT-GPT2"] = vit_caption
+
+        # GIT
+        model_name = "GIT"
+        inference_counter.labels(model=model_name).inc()
+        start = time.time()
+        try:
+            git_caption = caption_generator_git(image)[0]['generated_text']
+        except Exception:
+            error_counter.labels(model=model_name).inc()
+            git_caption = ""
+        finally:
+            inference_time.labels(model=model_name).observe(time.time() - start)
+        captions["GIT-large-COCO"] = git_caption
+
+        # BLIP
+        model_name = "BLIP"
+        inference_counter.labels(model=model_name).inc()
+        start = time.time()
+        try:
+            blip_caption = generate_captions_blip(image)
+        except Exception:
+            error_counter.labels(model=model_name).inc()
+            blip_caption = ""
+        finally:
+            inference_time.labels(model=model_name).observe(time.time() - start)
+        captions["BLIP"] = blip_caption
+
+        image_name = os.path.basename(save_path)
+
+        for model, caption in captions.items():
+            is_equivalent = are_sentences_equivalent(caption, user_caption)
+            caption_colors[model] = "green" if is_equivalent else "red"
+
+            try:
+                embedding1 = get_sentence_embedding(caption)
+                embedding2 = get_sentence_embedding(user_caption)
+                sim = cosine_similarity(embedding1.reshape(1, -1), embedding2.reshape(1, -1))[0][0]
+                cosine_score.labels(model=model, image=image_name).set(sim)
+            except:
+                pass
+
+            equivalence_flag.labels(model=model, image=image_name).set(1 if is_equivalent else 0)
+
+        caption_data = {
+            "image": save_path,
+            "captions": captions,
+            "user_caption": user_caption
+        }
+
+        producer.send('captions-input', value=caption_data)
+        producer.flush()
+
+        flink_scores = get_scored_results(save_path)
+
+        return render_template(
+            "result.html",
+            image_path=save_path,
+            captions=captions,
+            caption_colors=caption_colors,
+            flink_scores=flink_scores,
+            user_caption=user_caption
+        )
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
+
+
+@app.route('/own-data', methods=['GET', 'POST'])
+def own_data():
+    if request.method == 'POST':
+        user_image = request.files.get('user_image')
+        description = request.form.get('description')
+
+        if not user_image or not description:
+            return render_template('own_data.html', error="Both image and description are required.")
+
+        filename = secure_filename(user_image.filename)
+        upload_dir = os.path.join("static", "uploads")
+        os.makedirs(upload_dir, exist_ok=True)
+
+        image_path = os.path.join(upload_dir, filename)
+        user_image.save(image_path)
+
+        try:
+            image = Image.open(image_path)
+            captions = {}
+            caption_colors = {}
+
+            # ViT-GPT2
+            model_name = "ViT-GPT2"
+            inference_counter.labels(model=model_name).inc()
+            start = time.time()
+            try:
+                pixel_values = vit_image_processor(image, return_tensors="pt").pixel_values
+                generated_ids = vit_model.generate(pixel_values)
+                vit_caption = vit_tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            except Exception:
+                error_counter.labels(model=model_name).inc()
+                vit_caption = ""
+            finally:
+                inference_time.labels(model=model_name).observe(time.time() - start)
+            captions["ViT-GPT2"] = vit_caption
+
+            # GIT
+            model_name = "GIT"
+            inference_counter.labels(model=model_name).inc()
+            start = time.time()
+            try:
+                git_caption = caption_generator_git(image)[0]['generated_text']
+            except Exception:
+                error_counter.labels(model=model_name).inc()
+                git_caption = ""
+            finally:
+                inference_time.labels(model=model_name).observe(time.time() - start)
+            captions["GIT-large-COCO"] = git_caption
+
+            # BLIP
+            model_name = "BLIP"
+            inference_counter.labels(model=model_name).inc()
+            start = time.time()
+            try:
+                blip_caption = generate_captions_blip(image)
+            except Exception:
+                error_counter.labels(model=model_name).inc()
+                blip_caption = ""
+            finally:
+                inference_time.labels(model=model_name).observe(time.time() - start)
+            captions["BLIP"] = blip_caption
+
+            image_name = os.path.basename(image_path)
+
+            for model, caption in captions.items():
+                is_equivalent = are_sentences_equivalent(caption, description)
+                caption_colors[model] = "green" if is_equivalent else "red"
+
+                try:
+                    embedding1 = get_sentence_embedding(caption)
+                    embedding2 = get_sentence_embedding(description)
+                    sim = cosine_similarity(embedding1.reshape(1, -1), embedding2.reshape(1, -1))[0][0]
+                    cosine_score.labels(model=model, image=image_name).set(sim)
+                except:
+                    pass
+
+                equivalence_flag.labels(model=model, image=image_name).set(1 if is_equivalent else 0)
+
+            captions["COCO"] = description
+
+            # Send to Kafka
+            caption_data = {
+                "image": image_path,
+                "captions": captions,
+            }
+
+            producer.send('captions-input', value=caption_data)
+            producer.flush()
+
+            # Retrieve Flink scores
+            flink_scores = get_scored_results(image_path)
+
+            return render_template(
+                "result.html",
+                image_path=image_path,
+                captions=captions,
+                caption_colors=caption_colors,
+                flink_scores=flink_scores,
+                user_caption=description
+            )
+
+        except Exception as e:
+            return render_template('own_data.html', error=f"Processing failed: {str(e)}")
+
+    return render_template('own_data.html')
 
 
 @app.route("/dataset/images")
