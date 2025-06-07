@@ -395,46 +395,22 @@ def own_data():
             captions = {}
             caption_colors = {}
 
-            # ViT-GPT2
-            model_name = "ViT-GPT2"
-            inference_counter.labels(model=model_name).inc()
-            start = time.time()
-            try:
-                pixel_values = vit_image_processor(image, return_tensors="pt").pixel_values
-                generated_ids = vit_model.generate(pixel_values)
-                vit_caption = vit_tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-            except Exception:
-                error_counter.labels(model=model_name).inc()
-                vit_caption = ""
-            finally:
-                inference_time.labels(model=model_name).observe(time.time() - start)
-            captions["ViT-GPT2"] = vit_caption
-
-            # GIT
-            model_name = "GIT"
-            inference_counter.labels(model=model_name).inc()
-            start = time.time()
-            try:
-                git_caption = caption_generator_git(image)[0]['generated_text']
-            except Exception:
-                error_counter.labels(model=model_name).inc()
-                git_caption = ""
-            finally:
-                inference_time.labels(model=model_name).observe(time.time() - start)
-            captions["GIT-large-COCO"] = git_caption
-
-            # BLIP
-            model_name = "BLIP"
-            inference_counter.labels(model=model_name).inc()
-            start = time.time()
-            try:
-                blip_caption = generate_captions_blip(image)
-            except Exception:
-                error_counter.labels(model=model_name).inc()
-                blip_caption = ""
-            finally:
-                inference_time.labels(model=model_name).observe(time.time() - start)
-            captions["BLIP"] = blip_caption
+            # Models inference + metrics update
+            for model_name, caption_func in [
+                ("ViT-GPT2", lambda img: vit_tokenizer.batch_decode(vit_model.generate(vit_image_processor(img, return_tensors="pt").pixel_values), skip_special_tokens=True)[0]),
+                ("GIT", lambda img: caption_generator_git(img)[0]['generated_text']),
+                ("BLIP", generate_captions_blip)
+            ]:
+                inference_counter.labels(model=model_name).inc()
+                start = time.time()
+                try:
+                    caption = caption_func(image)
+                except Exception:
+                    error_counter.labels(model=model_name).inc()
+                    caption = ""
+                finally:
+                    inference_time.labels(model=model_name).observe(time.time() - start)
+                captions[model_name if model_name != "GIT" else "GIT-large-COCO"] = caption
 
             image_name = os.path.basename(image_path)
 
@@ -447,23 +423,21 @@ def own_data():
                     embedding2 = get_sentence_embedding(description)
                     sim = cosine_similarity(embedding1.reshape(1, -1), embedding2.reshape(1, -1))[0][0]
                     cosine_score.labels(model=model, image=image_name).set(sim)
-                except:
+                except Exception:
                     pass
 
                 equivalence_flag.labels(model=model, image=image_name).set(1 if is_equivalent else 0)
 
             captions["COCO"] = description
 
-            # Send to Kafka
+            # Send Kafka message
             caption_data = {
                 "image": image_path,
                 "captions": captions,
             }
-
             producer.send('captions-input', value=caption_data)
             producer.flush()
 
-            # Retrieve Flink scores
             flink_scores = get_scored_results(image_path)
 
             return render_template(
@@ -479,6 +453,7 @@ def own_data():
             return render_template('own_data.html', error=f"Processing failed: {str(e)}")
 
     return render_template('own_data.html')
+
 
 
 @app.route("/dataset/images")
